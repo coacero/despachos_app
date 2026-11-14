@@ -1,1 +1,156 @@
-hola...
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Prueba Despachos - COACERO</title>
+  <script src="https://alcdn.msauth.net/browser/2.38.3/js/msal-browser.min.js"></script>
+  <style>
+    body { font-family: system-ui, sans-serif; background: #f1f5f9; margin: 0; padding: 16px; color: #0f172a; }
+    .container { max-width: 720px; margin: 0 auto; }
+    .topbar { display: flex; justify-content: space-between; align-items: center; background: #fff; padding: 14px 18px; border-radius: 10px; box-shadow: 0 1px 3px rgba(0,0,0,.1); margin-bottom: 16px; }
+    .card { background: #fff; padding: 16px; border-radius: 10px; box-shadow: 0 1px 3px rgba(0,0,0,.1); margin-bottom: 12px; border-left: 5px solid #94a3b8; }
+    .card.Enviado { border-left-color: #0284c7; }
+    .card.Entregado { border-left-color: #15803d; }
+    .card.Devuelto { border-left-color: #d97706; }
+    .card.ANULADO { border-left-color: #b91c1c; }
+    .btns { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+    button { padding: 8px 14px; border-radius: 6px; border: 1px solid #cbd5e1; background: #fff; font-weight: 600; cursor: pointer; }
+    button.primary { background: #1e3a8a; color: #fff; border: none; }
+    button.active-Enviado { background: #0284c7; color: #fff; border-color: #0284c7; }
+    button.active-Entregado { background: #15803d; color: #fff; border-color: #15803d; }
+    button.active-Devuelto { background: #d97706; color: #fff; border-color: #d97706; }
+    button.active-ANULADO { background: #b91c1c; color: #fff; border-color: #b91c1c; }
+    .status-msg { font-size: 13px; color: #475569; margin-bottom: 12px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="topbar">
+      <div>
+        <strong>Control de Despachos (Prueba)</strong>
+        <div id="userInfo" style="font-size: 12px; color: #64748b;">No autenticado</div>
+      </div>
+      <button id="btnLogin" class="primary" onclick="iniciarSesion()">Iniciar sesión</button>
+    </div>
+
+    <div id="mensaje" class="status-msg">Inicia sesión con tu cuenta de Microsoft para cargar Lista_Pruebas.</div>
+    <div id="lista"></div>
+  </div>
+
+  <script>
+    // === CONFIGURACIÓN ===
+    const CLIENT_ID = "63f33c22-e934-4565-9498-20c1a1d32889";
+    const TENANT_ID = "7e9c834e-d7c8-4ab0-8834-f003a7129324";
+    const SITE_PATH = "coacerogt.sharepoint.com:/sites/despachos";
+    const LIST_NAME = "Lista_Pruebas";
+    const ESTADOS = ["Enviado", "Entregado", "Devuelto", "ANULADO"];
+
+    const msalInstance = new msal.PublicClientApplication({
+      auth: {
+        clientId: CLIENT_ID,
+        authority: `https://login.microsoftonline.com/${TENANT_ID}`,
+        redirectUri: window.location.origin + window.location.pathname
+      }
+    });
+
+    const loginRequest = { scopes: ["Sites.ReadWrite.All"] };
+    let siteIdCache = null;
+
+    async function getToken() {
+      const accounts = msalInstance.getAllAccounts();
+      if (accounts.length === 0) {
+        const res = await msalInstance.loginPopup(loginRequest);
+        msalInstance.setActiveAccount(res.account);
+      } else {
+        msalInstance.setActiveAccount(accounts[0]);
+      }
+      const tokenRes = await msalInstance.acquireTokenSilent(loginRequest);
+      return tokenRes.accessToken;
+    }
+
+    async function iniciarSesion() {
+      try {
+        document.getElementById("mensaje").innerText = "Conectando con Microsoft...";
+        const token = await getToken();
+        const account = msalInstance.getActiveAccount();
+        document.getElementById("userInfo").innerText = account.username;
+        document.getElementById("btnLogin").style.display = "none";
+        await cargarDespachos(token);
+      } catch (err) {
+        document.getElementById("mensaje").innerText = "Error de acceso: " + err.message;
+      }
+    }
+
+    async function cargarDespachos(token) {
+      document.getElementById("mensaje").innerText = "Leyendo registros de SharePoint...";
+      if (!siteIdCache) {
+        const siteRes = await fetch(`https://graph.microsoft.com/v1.0/sites/${SITE_PATH}`, {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+        const siteData = await siteRes.json();
+        if (!siteRes.ok) throw new Error(siteData.error?.message || "No se encontró el sitio");
+        siteIdCache = siteData.id;
+      }
+
+      const itemsRes = await fetch(`https://graph.microsoft.com/v1.0/sites/${siteIdCache}/lists/${LIST_NAME}/items?expand=fields`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      const itemsData = await itemsRes.json();
+      if (!itemsRes.ok) throw new Error(itemsData.error?.message || "No se encontró la lista");
+
+      renderizar(itemsData.value);
+      document.getElementById("mensaje").innerText = `Conectado (${itemsData.value.length} registros).`;
+    }
+
+    function renderizar(items) {
+      const contenedor = document.getElementById("lista");
+      contenedor.innerHTML = "";
+      items.forEach(item => {
+        const f = item.fields;
+        const estadoActual = f.Estado || "";
+        const card = document.createElement("div");
+        card.className = `card ${estadoActual}`;
+        card.innerHTML = `
+          <div style="font-weight: 700; font-size: 16px;">Despacho #${f.Title || item.id}</div>
+          <div style="font-size: 13px; color: #475569; margin-top: 4px;">Piloto: ${f.PilotoID || "Sin asignar"} | Vehículo: ${f.VehiculoID || "-"}</div>
+          <div class="btns">
+            ${ESTADOS.map(est => `
+              <button class="${estadoActual === est ? 'active-' + est : ''}" onclick="cambiarEstado('${item.id}', '${est}')">${est}</button>
+            `).join("")}
+          </div>
+        `;
+        contenedor.appendChild(card);
+      });
+    }
+
+    async function cambiarEstado(itemId, nuevoEstado) {
+      try {
+        document.getElementById("mensaje").innerText = `Guardando estado "${nuevoEstado}"...`;
+        const token = await getToken();
+        const res = await fetch(`https://graph.microsoft.com/v1.0/sites/${siteIdCache}/lists/${LIST_NAME}/items/${itemId}/fields`, {
+          method: "PATCH",
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({ Estado: nuevoEstado })
+        });
+        if (!res.ok) {
+          const errData = await res.json();
+          throw new Error(errData.error?.message || "Error al actualizar");
+        }
+        await cargarDespachos(token);
+      } catch (err) {
+        document.getElementById("mensaje").innerText = "Error: " + err.message;
+      }
+    }
+
+    // Auto-reconexión si ya había sesión abierta
+    window.onload = async () => {
+      await msalInstance.initialize();
+      if (msalInstance.getAllAccounts().length > 0) iniciarSesion();
+    };
+  </script>
+</body>
+</html>
