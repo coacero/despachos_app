@@ -4,7 +4,8 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Prueba Despachos - COACERO</title>
-  <script src="https://alcdn.msauth.net/browser/2.38.3/js/msal-browser.min.js"></script>
+  <script src="https://alcdn.msauth.net/browser/2.38.3/js/msal-browser.min.js"
+          onerror="this.onerror=null;this.src='https://cdn.jsdelivr.net/npm/@azure/msal-browser@2.38.3/lib/msal-browser.min.js';"></script>
   <style>
     body { font-family: system-ui, sans-serif; background: #f1f5f9; margin: 0; padding: 16px; color: #0f172a; }
     .container { max-width: 720px; margin: 0 auto; }
@@ -39,33 +40,42 @@
   </div>
 
   <script>
-    // === CONFIGURACIÓN ===
     const CLIENT_ID = "63f33c22-e934-4565-9498-20c1a1d32889";
     const TENANT_ID = "7e9c834e-d7c8-4ab0-8834-f003a7129324";
     const SITE_PATH = "coacerogt.sharepoint.com:/sites/despachos";
     const LIST_NAME = "Lista_Pruebas";
     const ESTADOS = ["Enviado", "Entregado", "Devuelto", "ANULADO"];
-
-    const msalInstance = new msal.PublicClientApplication({
-      auth: {
-        clientId: CLIENT_ID,
-        authority: `https://login.microsoftonline.com/${TENANT_ID}`,
-        redirectUri: window.location.origin + window.location.pathname
-      }
-    });
-
     const loginRequest = { scopes: ["Sites.ReadWrite.All"] };
-    let siteIdCache = null;
+
+    var msalApp = null;
+    var siteIdCache = null;
+
+    function getMsal() {
+      if (typeof msal === "undefined") {
+        throw new Error("No se pudo cargar la librería de Microsoft. Recarga la página (Ctrl+F5).");
+      }
+      if (!msalApp) {
+        msalApp = new msal.PublicClientApplication({
+          auth: {
+            clientId: CLIENT_ID,
+            authority: `https://login.microsoftonline.com/${TENANT_ID}`,
+            redirectUri: window.location.origin + window.location.pathname
+          }
+        });
+      }
+      return msalApp;
+    }
 
     async function getToken() {
-      const accounts = msalInstance.getAllAccounts();
+      const app = getMsal();
+      const accounts = app.getAllAccounts();
       if (accounts.length === 0) {
-        const res = await msalInstance.loginPopup(loginRequest);
-        msalInstance.setActiveAccount(res.account);
+        const res = await app.loginPopup(loginRequest);
+        app.setActiveAccount(res.account);
       } else {
-        msalInstance.setActiveAccount(accounts[0]);
+        app.setActiveAccount(accounts[0]);
       }
-      const tokenRes = await msalInstance.acquireTokenSilent(loginRequest);
+      const tokenRes = await app.acquireTokenSilent(loginRequest);
       return tokenRes.accessToken;
     }
 
@@ -73,7 +83,7 @@
       try {
         document.getElementById("mensaje").innerText = "Conectando con Microsoft...";
         const token = await getToken();
-        const account = msalInstance.getActiveAccount();
+        const account = getMsal().getActiveAccount();
         document.getElementById("userInfo").innerText = account.username;
         document.getElementById("btnLogin").style.display = "none";
         await cargarDespachos(token);
@@ -146,11 +156,11 @@
       }
     }
 
-    // Auto-reconexión si ya había sesión abierta
-    window.onload = async () => {
-      await msalInstance.initialize();
-      if (msalInstance.getAllAccounts().length > 0) iniciarSesion();
-    };
+    window.addEventListener("load", () => {
+      try {
+        if (getMsal().getAllAccounts().length > 0) iniciarSesion();
+      } catch (e) {}
+    });
   </script>
 </body>
 </html>
