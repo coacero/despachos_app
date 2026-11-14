@@ -4,8 +4,6 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Prueba Despachos - COACERO</title>
-  <script src="https://alcdn.msauth.net/browser/2.38.3/js/msal-browser.min.js"
-          onerror="this.onerror=null;this.src='https://cdn.jsdelivr.net/npm/@azure/msal-browser@2.38.3/lib/msal-browser.min.js';"></script>
   <style>
     body { font-family: system-ui, sans-serif; background: #f1f5f9; margin: 0; padding: 16px; color: #0f172a; }
     .container { max-width: 720px; margin: 0 auto; }
@@ -18,6 +16,7 @@
     .btns { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
     button { padding: 8px 14px; border-radius: 6px; border: 1px solid #cbd5e1; background: #fff; font-weight: 600; cursor: pointer; }
     button.primary { background: #1e3a8a; color: #fff; border: none; }
+    button.secondary { background: #e2e8f0; color: #334155; border: none; font-size: 12px; }
     button.active-Enviado { background: #0284c7; color: #fff; border-color: #0284c7; }
     button.active-Entregado { background: #15803d; color: #fff; border-color: #15803d; }
     button.active-Devuelto { background: #d97706; color: #fff; border-color: #d97706; }
@@ -32,7 +31,10 @@
         <strong>Control de Despachos (Prueba)</strong>
         <div id="userInfo" style="font-size: 12px; color: #64748b;">No autenticado</div>
       </div>
-      <button id="btnLogin" class="primary" onclick="iniciarSesion()">Iniciar sesión</button>
+      <div>
+        <button id="btnLogin" class="primary" onclick="iniciarSesion()">Iniciar sesión</button>
+        <button id="btnLogout" class="secondary" style="display:none;" onclick="cerrarSesion()">Salir</button>
+      </div>
     </div>
 
     <div id="mensaje" class="status-msg">Inicia sesión con tu cuenta de Microsoft para cargar Lista_Pruebas.</div>
@@ -42,56 +44,77 @@
   <script>
     const CLIENT_ID = "63f33c22-e934-4565-9498-20c1a1d32889";
     const TENANT_ID = "7e9c834e-d7c8-4ab0-8834-f003a7129324";
+    const REDIRECT_URI = window.location.origin + window.location.pathname;
+    const SCOPE = "openid profile email Sites.ReadWrite.All";
     const SITE_PATH = "coacerogt.sharepoint.com:/sites/despachos";
     const LIST_NAME = "Lista_Pruebas";
     const ESTADOS = ["Enviado", "Entregado", "Devuelto", "ANULADO"];
-    const loginRequest = { scopes: ["Sites.ReadWrite.All"] };
 
-    var msalApp = null;
-    var siteIdCache = null;
+    let siteIdCache = null;
 
-    function getMsal() {
-      if (typeof msal === "undefined") {
-        throw new Error("No se pudo cargar la librería de Microsoft. Recarga la página (Ctrl+F5).");
-      }
-      if (!msalApp) {
-        msalApp = new msal.PublicClientApplication({
-          auth: {
-            clientId: CLIENT_ID,
-            authority: `https://login.microsoftonline.com/${TENANT_ID}`,
-            redirectUri: window.location.origin + window.location.pathname
-          }
-        });
-      }
-      return msalApp;
+    // --- Utilidades OAuth 2.0 PKCE Nativas (Cero dependencias externas) ---
+    function base64UrlEncode(buffer) {
+      return btoa(String.fromCharCode(...new Uint8Array(buffer)))
+        .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
     }
 
-    async function getToken() {
-      const app = getMsal();
-      const accounts = app.getAllAccounts();
-      if (accounts.length === 0) {
-        const res = await app.loginPopup(loginRequest);
-        app.setActiveAccount(res.account);
-      } else {
-        app.setActiveAccount(accounts[0]);
-      }
-      const tokenRes = await app.acquireTokenSilent(loginRequest);
-      return tokenRes.accessToken;
+    async function generarPKCE() {
+      const array = new Uint8Array(32);
+      crypto.getRandomValues(array);
+      const verifier = base64UrlEncode(array);
+      const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier));
+      const challenge = base64UrlEncode(hash);
+      return { verifier, challenge };
     }
 
     async function iniciarSesion() {
-      try {
-        document.getElementById("mensaje").innerText = "Conectando con Microsoft...";
-        const token = await getToken();
-        const account = getMsal().getActiveAccount();
-        document.getElementById("userInfo").innerText = account.username;
-        document.getElementById("btnLogin").style.display = "none";
-        await cargarDespachos(token);
-      } catch (err) {
-        document.getElementById("mensaje").innerText = "Error de acceso: " + err.message;
-      }
+      const { verifier, challenge } = await generarPKCE();
+      sessionStorage.setItem("pkce_verifier", verifier);
+      const authUrl = `https://login.microsoftonline.com/${TENANT_ID}/oauth2/v2.0/authorize` +
+        `?client_id=${encodeURIComponent(CLIENT_ID)}` +
+        `&response_type=code` +
+        `&redirect_uri=${encodeURIComponent(REDIRECT_URI)}` +
+        `&response_mode=query` +
+        `&scope=${encodeURIComponent(SCOPE)}` +
+        `&code_challenge=${encodeURIComponent(challenge)}` +
+        `&code_challenge_method=S256`;
+      window.location.href = authUrl;
     }
 
+    function cerrarSesion() {
+      sessionStorage.clear();
+      location.reload();
+    }
+
+    async function intercambiarCodigoPorToken(code) {
+      const verifier = sessionStorage.getItem("pkce_verifier");
+      const body = new URLSearchParams({
+        client_id: CLIENT_ID,
+        grant_type: "authorization_code",
+        code: code,
+        redirect_uri: REDIRECT_URI,
+        code_verifier: verifier,
+        scope: SCOPE
+      });
+
+      const res = await fetch(`https://login.microsoftonline.com/${TENANT_ID}/oauth2/v2.0/token`, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: body.toString()
+      });
+
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error_description || data.error || "Error al obtener token");
+
+      sessionStorage.setItem("ms_access_token", data.access_token);
+      if (data.id_token) {
+        const payload = JSON.parse(atob(data.id_token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/")));
+        sessionStorage.setItem("ms_user", payload.preferred_username || payload.email || payload.name || "Conectado");
+      }
+      return data.access_token;
+    }
+
+    // --- Operaciones con SharePoint vía Microsoft Graph ---
     async function cargarDespachos(token) {
       document.getElementById("mensaje").innerText = "Leyendo registros de SharePoint...";
       if (!siteIdCache) {
@@ -137,7 +160,7 @@
     async function cambiarEstado(itemId, nuevoEstado) {
       try {
         document.getElementById("mensaje").innerText = `Guardando estado "${nuevoEstado}"...`;
-        const token = await getToken();
+        const token = sessionStorage.getItem("ms_access_token");
         const res = await fetch(`https://graph.microsoft.com/v1.0/sites/${siteIdCache}/lists/${LIST_NAME}/items/${itemId}/fields`, {
           method: "PATCH",
           headers: {
@@ -156,10 +179,34 @@
       }
     }
 
-    window.addEventListener("load", () => {
+    // --- Inicialización al cargar la página ---
+    window.addEventListener("load", async () => {
       try {
-        if (getMsal().getAllAccounts().length > 0) iniciarSesion();
-      } catch (e) {}
+        const params = new URLSearchParams(window.location.search);
+        const code = params.get("code");
+        const authError = params.get("error_description");
+
+        if (authError) {
+          document.getElementById("mensaje").innerText = "Error de Microsoft: " + authError;
+          return;
+        }
+
+        let token = sessionStorage.getItem("ms_access_token");
+        if (code) {
+          document.getElementById("mensaje").innerText = "Validando sesión con Microsoft...";
+          window.history.replaceState({}, document.title, REDIRECT_URI);
+          token = await intercambiarCodigoPorToken(code);
+        }
+
+        if (token) {
+          document.getElementById("userInfo").innerText = sessionStorage.getItem("ms_user") || "Conectado";
+          document.getElementById("btnLogin").style.display = "none";
+          document.getElementById("btnLogout").style.display = "inline-block";
+          await cargarDespachos(token);
+        }
+      } catch (err) {
+        document.getElementById("mensaje").innerText = "Error de acceso: " + err.message;
+      }
     });
   </script>
 </body>
