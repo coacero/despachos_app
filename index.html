@@ -3,12 +3,12 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Prueba Despachos - COACERO</title>
+  <title>Control de Despachos - COACERO</title>
   <style>
     body { font-family: system-ui, sans-serif; background: #f1f5f9; margin: 0; padding: 16px; color: #0f172a; }
     .container { max-width: 720px; margin: 0 auto; }
-    .topbar { display: flex; justify-content: space-between; align-items: center; background: #fff; padding: 14px 18px; border-radius: 10px; box-shadow: 0 1px 3px rgba(0,0,0,.1); margin-bottom: 16px; }
-    .card { background: #fff; padding: 16px; border-radius: 10px; box-shadow: 0 1px 3px rgba(0,0,0,.1); margin-bottom: 12px; border-left: 5px solid #94a3b8; }
+    .topbar { display: flex; justify-content: space-between; align-items: center; gap: 10px; background: #fff; padding: 14px 18px; border-radius: 10px; box-shadow: 0 1px 3px rgba(0,0,0,.1); margin-bottom: 12px; }
+    .card { background: #fff; padding: 16px; border-radius: 10px; box-shadow: 0 1px 3px rgba(0,0,0,.1); margin-bottom: 12px; border-left: 5px solid #94a3b8; transition: border-color .2s; }
     .card.Enviado { border-left-color: #0284c7; }
     .card.Entregado { border-left-color: #15803d; }
     .card.Devuelto { border-left-color: #d97706; }
@@ -16,28 +16,32 @@
     .btns { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
     button { padding: 8px 14px; border-radius: 6px; border: 1px solid #cbd5e1; background: #fff; font-weight: 600; cursor: pointer; }
     button.primary { background: #1e3a8a; color: #fff; border: none; }
-    button.secondary { background: #e2e8f0; color: #334155; border: none; font-size: 12px; }
+    button.secondary { background: #e2e8f0; color: #334155; border: none; font-size: 12px; padding: 7px 10px; }
     button.active-Enviado { background: #0284c7; color: #fff; border-color: #0284c7; }
     button.active-Entregado { background: #15803d; color: #fff; border-color: #15803d; }
     button.active-Devuelto { background: #d97706; color: #fff; border-color: #d97706; }
     button.active-ANULADO { background: #b91c1c; color: #fff; border-color: #b91c1c; }
-    .status-msg { font-size: 13px; color: #475569; margin-bottom: 12px; }
+    .status-bar { display: flex; justify-content: space-between; font-size: 12px; color: #475569; margin-bottom: 12px; padding: 0 4px; }
   </style>
 </head>
 <body>
   <div class="container">
     <div class="topbar">
       <div>
-        <strong>Control de Despachos (Prueba)</strong>
+        <strong>Control de Despachos</strong>
         <div id="userInfo" style="font-size: 12px; color: #64748b;">No autenticado</div>
       </div>
-      <div>
+      <div style="display:flex; gap:6px;">
+        <button id="btnRefresh" class="secondary" style="display:none;" onclick="cargarDespachos(false)">↻ Actualizar</button>
         <button id="btnLogin" class="primary" onclick="iniciarSesion()">Iniciar sesión</button>
         <button id="btnLogout" class="secondary" style="display:none;" onclick="cerrarSesion()">Salir</button>
       </div>
     </div>
 
-    <div id="mensaje" class="status-msg">Inicia sesión con tu cuenta de Microsoft para cargar Lista_Pruebas.</div>
+    <div class="status-bar">
+      <span id="mensaje">Inicia sesión con tu cuenta de Microsoft.</span>
+      <span id="lastSync"></span>
+    </div>
     <div id="lista"></div>
   </div>
 
@@ -45,14 +49,17 @@
     const CLIENT_ID = "63f33c22-e934-4565-9498-20c1a1d32889";
     const TENANT_ID = "7e9c834e-d7c8-4ab0-8834-f003a7129324";
     const REDIRECT_URI = window.location.origin + window.location.pathname;
-    const SCOPE = "openid profile email Sites.ReadWrite.All";
+    const SCOPE = "openid profile email offline_access Sites.ReadWrite.All";
     const SITE_PATH = "coacerogt.sharepoint.com:/sites/despachos";
     const LIST_NAME = "Lista_Pruebas";
     const ESTADOS = ["Enviado", "Entregado", "Devuelto", "ANULADO"];
+    const INTERVALO_SYNC_MS = 10000; // 10 segundos
 
     let siteIdCache = null;
+    let guardando = false;
+    let syncTimer = null;
 
-    // --- Utilidades OAuth 2.0 PKCE Nativas (Cero dependencias externas) ---
+    // --- OAuth 2.0 PKCE + Renovación Silenciosa ---
     function base64UrlEncode(buffer) {
       return btoa(String.fromCharCode(...new Uint8Array(buffer)))
         .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
@@ -63,77 +70,103 @@
       crypto.getRandomValues(array);
       const verifier = base64UrlEncode(array);
       const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier));
-      const challenge = base64UrlEncode(hash);
-      return { verifier, challenge };
+      return { verifier, challenge: base64UrlEncode(hash) };
     }
 
     async function iniciarSesion() {
       const { verifier, challenge } = await generarPKCE();
-      sessionStorage.setItem("pkce_verifier", verifier);
+      localStorage.setItem("pkce_verifier", verifier);
       const authUrl = `https://login.microsoftonline.com/${TENANT_ID}/oauth2/v2.0/authorize` +
-        `?client_id=${encodeURIComponent(CLIENT_ID)}` +
-        `&response_type=code` +
-        `&redirect_uri=${encodeURIComponent(REDIRECT_URI)}` +
-        `&response_mode=query` +
-        `&scope=${encodeURIComponent(SCOPE)}` +
-        `&code_challenge=${encodeURIComponent(challenge)}` +
-        `&code_challenge_method=S256`;
+        `?client_id=${encodeURIComponent(CLIENT_ID)}&response_type=code` +
+        `&redirect_uri=${encodeURIComponent(REDIRECT_URI)}&response_mode=query` +
+        `&scope=${encodeURIComponent(SCOPE)}&code_challenge=${encodeURIComponent(challenge)}&code_challenge_method=S256`;
       window.location.href = authUrl;
     }
 
     function cerrarSesion() {
-      sessionStorage.clear();
+      clearInterval(syncTimer);
+      localStorage.clear();
       location.reload();
     }
 
-    async function intercambiarCodigoPorToken(code) {
-      const verifier = sessionStorage.getItem("pkce_verifier");
-      const body = new URLSearchParams({
-        client_id: CLIENT_ID,
-        grant_type: "authorization_code",
-        code: code,
-        redirect_uri: REDIRECT_URI,
-        code_verifier: verifier,
-        scope: SCOPE
-      });
-
-      const res = await fetch(`https://login.microsoftonline.com/${TENANT_ID}/oauth2/v2.0/token`, {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: body.toString()
-      });
-
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error_description || data.error || "Error al obtener token");
-
-      sessionStorage.setItem("ms_access_token", data.access_token);
+    function guardarTokens(data) {
+      localStorage.setItem("ms_access_token", data.access_token);
+      if (data.refresh_token) localStorage.setItem("ms_refresh_token", data.refresh_token);
       if (data.id_token) {
         const payload = JSON.parse(atob(data.id_token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/")));
-        sessionStorage.setItem("ms_user", payload.preferred_username || payload.email || payload.name || "Conectado");
+        localStorage.setItem("ms_user", payload.preferred_username || payload.email || payload.name || "Conectado");
       }
+    }
+
+    async function intercambiarCodigoPorToken(code) {
+      const body = new URLSearchParams({
+        client_id: CLIENT_ID, grant_type: "authorization_code", code,
+        redirect_uri: REDIRECT_URI, code_verifier: localStorage.getItem("pkce_verifier"), scope: SCOPE
+      });
+      const res = await fetch(`https://login.microsoftonline.com/${TENANT_ID}/oauth2/v2.0/token`, {
+        method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: body.toString()
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error_description || "Error de autenticación");
+      guardarTokens(data);
       return data.access_token;
     }
 
-    // --- Operaciones con SharePoint vía Microsoft Graph ---
-    async function cargarDespachos(token) {
-      document.getElementById("mensaje").innerText = "Leyendo registros de SharePoint...";
-      if (!siteIdCache) {
-        const siteRes = await fetch(`https://graph.microsoft.com/v1.0/sites/${SITE_PATH}`, {
-          headers: { Authorization: `Bearer ${token}` }
-        });
-        const siteData = await siteRes.json();
-        if (!siteRes.ok) throw new Error(siteData.error?.message || "No se encontró el sitio");
-        siteIdCache = siteData.id;
-      }
-
-      const itemsRes = await fetch(`https://graph.microsoft.com/v1.0/sites/${siteIdCache}/lists/${LIST_NAME}/items?expand=fields`, {
-        headers: { Authorization: `Bearer ${token}` }
+    async function renovarToken() {
+      const refreshToken = localStorage.getItem("ms_refresh_token");
+      if (!refreshToken) throw new Error("Sesión expirada");
+      const body = new URLSearchParams({
+        client_id: CLIENT_ID, grant_type: "refresh_token", refresh_token: refreshToken, scope: SCOPE
       });
-      const itemsData = await itemsRes.json();
-      if (!itemsRes.ok) throw new Error(itemsData.error?.message || "No se encontró la lista");
+      const res = await fetch(`https://login.microsoftonline.com/${TENANT_ID}/oauth2/v2.0/token`, {
+        method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: body.toString()
+      });
+      const data = await res.json();
+      if (!res.ok) { cerrarSesion(); return null; }
+      guardarTokens(data);
+      return data.access_token;
+    }
 
-      renderizar(itemsData.value);
-      document.getElementById("mensaje").innerText = `Conectado (${itemsData.value.length} registros).`;
+    async function graphFetch(url, options = {}) {
+      let token = localStorage.getItem("ms_access_token");
+      let res = await fetch(url, {
+        ...options,
+        headers: { ...(options.headers || {}), Authorization: `Bearer ${token}` }
+      });
+      if (res.status === 401) {
+        token = await renovarToken();
+        if (!token) return res;
+        res = await fetch(url, {
+          ...options,
+          headers: { ...(options.headers || {}), Authorization: `Bearer ${token}` }
+        });
+      }
+      return res;
+    }
+
+    // --- Lectura y Escritura en SharePoint ---
+    async function cargarDespachos(silencioso = false) {
+      if (guardando) return;
+      try {
+        if (!silencioso) document.getElementById("mensaje").innerText = "Sincronizando...";
+        if (!siteIdCache) {
+          const siteRes = await graphFetch(`https://graph.microsoft.com/v1.0/sites/${SITE_PATH}`);
+          const siteData = await siteRes.json();
+          if (!siteRes.ok) throw new Error(siteData.error?.message || "No se encontró el sitio");
+          siteIdCache = siteData.id;
+        }
+
+        const itemsRes = await graphFetch(`https://graph.microsoft.com/v1.0/sites/${siteIdCache}/lists/${LIST_NAME}/items?expand=fields`);
+        const itemsData = await itemsRes.json();
+        if (!itemsRes.ok) throw new Error(itemsData.error?.message || "No se encontró la lista");
+
+        renderizar(itemsData.value);
+        const hora = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        document.getElementById("mensaje").innerText = `Conectado (${itemsData.value.length} registros)`;
+        document.getElementById("lastSync").innerText = `Sync: ${hora}`;
+      } catch (err) {
+        if (!silencioso) document.getElementById("mensaje").innerText = "Error: " + err.message;
+      }
     }
 
     function renderizar(items) {
@@ -158,51 +191,61 @@
     }
 
     async function cambiarEstado(itemId, nuevoEstado) {
+      if (guardando) return;
+      guardando = true;
       try {
-        document.getElementById("mensaje").innerText = `Guardando estado "${nuevoEstado}"...`;
-        const token = sessionStorage.getItem("ms_access_token");
-        const res = await fetch(`https://graph.microsoft.com/v1.0/sites/${siteIdCache}/lists/${LIST_NAME}/items/${itemId}/fields`, {
+        document.getElementById("mensaje").innerText = `Guardando "${nuevoEstado}"...`;
+        const res = await graphFetch(`https://graph.microsoft.com/v1.0/sites/${siteIdCache}/lists/${LIST_NAME}/items/${itemId}/fields`, {
           method: "PATCH",
-          headers: {
-            Authorization: `Bearer ${token}`,
-            "Content-Type": "application/json"
-          },
+          headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ Estado: nuevoEstado })
         });
         if (!res.ok) {
           const errData = await res.json();
           throw new Error(errData.error?.message || "Error al actualizar");
         }
-        await cargarDespachos(token);
+        guardando = false;
+        await cargarDespachos(false);
       } catch (err) {
+        guardando = false;
         document.getElementById("mensaje").innerText = "Error: " + err.message;
       }
     }
 
-    // --- Inicialización al cargar la página ---
+    function iniciarAutoSync() {
+      if (syncTimer) clearInterval(syncTimer);
+      syncTimer = setInterval(() => {
+        if (!document.hidden && localStorage.getItem("ms_access_token")) {
+          cargarDespachos(true);
+        }
+      }, INTERVALO_SYNC_MS);
+    }
+
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden && localStorage.getItem("ms_access_token")) {
+        cargarDespachos(true);
+      }
+    });
+
     window.addEventListener("load", async () => {
       try {
         const params = new URLSearchParams(window.location.search);
         const code = params.get("code");
-        const authError = params.get("error_description");
+        let token = localStorage.getItem("ms_access_token");
 
-        if (authError) {
-          document.getElementById("mensaje").innerText = "Error de Microsoft: " + authError;
-          return;
-        }
-
-        let token = sessionStorage.getItem("ms_access_token");
         if (code) {
-          document.getElementById("mensaje").innerText = "Validando sesión con Microsoft...";
+          document.getElementById("mensaje").innerText = "Validando sesión...";
           window.history.replaceState({}, document.title, REDIRECT_URI);
           token = await intercambiarCodigoPorToken(code);
         }
 
         if (token) {
-          document.getElementById("userInfo").innerText = sessionStorage.getItem("ms_user") || "Conectado";
+          document.getElementById("userInfo").innerText = localStorage.getItem("ms_user") || "Conectado";
           document.getElementById("btnLogin").style.display = "none";
           document.getElementById("btnLogout").style.display = "inline-block";
-          await cargarDespachos(token);
+          document.getElementById("btnRefresh").style.display = "inline-block";
+          await cargarDespachos(false);
+          iniciarAutoSync();
         }
       } catch (err) {
         document.getElementById("mensaje").innerText = "Error de acceso: " + err.message;
