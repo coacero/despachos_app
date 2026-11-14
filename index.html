@@ -8,20 +8,36 @@
     body { font-family: system-ui, sans-serif; background: #f1f5f9; margin: 0; padding: 16px; color: #0f172a; }
     .container { max-width: 720px; margin: 0 auto; }
     .topbar { display: flex; justify-content: space-between; align-items: center; gap: 10px; background: #fff; padding: 14px 18px; border-radius: 10px; box-shadow: 0 1px 3px rgba(0,0,0,.1); margin-bottom: 12px; }
-    .card { background: #fff; padding: 16px; border-radius: 10px; box-shadow: 0 1px 3px rgba(0,0,0,.1); margin-bottom: 12px; border-left: 5px solid #94a3b8; transition: border-color .2s; }
+    
+    /* Barra de filtros */
+    .filters { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 6px; margin-bottom: 10px; }
+    .filter-btn { padding: 6px 12px; border-radius: 999px; border: 1px solid #cbd5e1; background: #fff; color: #475569; font-size: 12px; font-weight: 600; white-space: nowrap; cursor: pointer; }
+    .filter-btn.active { background: #0f172a; color: #fff; border-color: #0f172a; }
+
+    /* Tarjetas */
+    .card { background: #fff; padding: 16px; border-radius: 10px; box-shadow: 0 1px 3px rgba(0,0,0,.1); margin-bottom: 12px; border-left: 5px solid #94a3b8; transition: background-color .3s, border-color .2s; }
     .card.Enviado { border-left-color: #0284c7; }
     .card.Entregado { border-left-color: #15803d; }
     .card.Devuelto { border-left-color: #d97706; }
     .card.ANULADO { border-left-color: #b91c1c; }
+    .card.is-modified { background: #fffbeb; box-shadow: 0 0 0 1px #f59e0b, 0 2px 6px rgba(245,158,11,.15); }
+
+    .card-header { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+    .badge-mod { display: inline-flex; align-items: center; gap: 4px; background: #fef3c7; color: #b45309; border: 1px solid #fcd34d; font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 999px; }
+
     .btns { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
     button { padding: 8px 14px; border-radius: 6px; border: 1px solid #cbd5e1; background: #fff; font-weight: 600; cursor: pointer; }
     button.primary { background: #1e3a8a; color: #fff; border: none; }
     button.secondary { background: #e2e8f0; color: #334155; border: none; font-size: 12px; padding: 7px 10px; }
+    button:disabled { opacity: 0.6; cursor: not-allowed; }
     button.active-Enviado { background: #0284c7; color: #fff; border-color: #0284c7; }
     button.active-Entregado { background: #15803d; color: #fff; border-color: #15803d; }
     button.active-Devuelto { background: #d97706; color: #fff; border-color: #d97706; }
     button.active-ANULADO { background: #b91c1c; color: #fff; border-color: #b91c1c; }
-    .status-bar { display: flex; justify-content: space-between; font-size: 12px; color: #475569; margin-bottom: 12px; padding: 0 4px; }
+
+    .status-bar { display: flex; justify-content: space-between; font-size: 12px; color: #475569; margin-bottom: 10px; padding: 0 4px; }
+    .spin { display: inline-block; animation: girar 0.8s linear infinite; }
+    @keyframes girar { 100% { transform: rotate(360deg); } }
   </style>
 </head>
 <body>
@@ -32,11 +48,15 @@
         <div id="userInfo" style="font-size: 12px; color: #64748b;">No autenticado</div>
       </div>
       <div style="display:flex; gap:6px;">
-        <button id="btnRefresh" class="secondary" style="display:none;" onclick="cargarDespachos(false)">↻ Actualizar</button>
+        <button id="btnRefresh" class="secondary" style="display:none;" onclick="refrescoManual()">
+          <span id="iconRefresh">↻</span> Actualizar
+        </button>
         <button id="btnLogin" class="primary" onclick="iniciarSesion()">Iniciar sesión</button>
         <button id="btnLogout" class="secondary" style="display:none;" onclick="cerrarSesion()">Salir</button>
       </div>
     </div>
+
+    <div id="filtrosBar" class="filters" style="display:none;"></div>
 
     <div class="status-bar">
       <span id="mensaje">Inicia sesión con tu cuenta de Microsoft.</span>
@@ -53,11 +73,18 @@
     const SITE_PATH = "coacerogt.sharepoint.com:/sites/despachos";
     const LIST_NAME = "Lista_Pruebas";
     const ESTADOS = ["Enviado", "Entregado", "Devuelto", "ANULADO"];
-    const INTERVALO_SYNC_MS = 10000; // 10 segundos
+    const INTERVALO_SYNC_MS = 10000;
 
     let siteIdCache = null;
     let guardando = false;
     let syncTimer = null;
+
+    // Estado de UI y detección de cambios
+    let itemsCache = [];
+    let filtroActual = "TODOS";
+    let snapshotPrevio = {};
+    let itemsModificados = new Set();
+    let primeraCarga = true;
 
     // --- OAuth 2.0 PKCE + Renovación Silenciosa ---
     function base64UrlEncode(buffer) {
@@ -144,9 +171,22 @@
       return res;
     }
 
-    // --- Lectura y Escritura en SharePoint ---
+    // --- Sincronización y Detección de Cambios ---
+    function setAnimacionRefresh(activo) {
+      const btn = document.getElementById("btnRefresh");
+      const icon = document.getElementById("iconRefresh");
+      btn.disabled = activo;
+      icon.className = activo ? "spin" : "";
+    }
+
+    async function refrescoManual() {
+      itemsModificados.clear();
+      await cargarDespachos(false);
+    }
+
     async function cargarDespachos(silencioso = false) {
       if (guardando) return;
+      setAnimacionRefresh(true);
       try {
         if (!silencioso) document.getElementById("mensaje").innerText = "Sincronizando...";
         if (!siteIdCache) {
@@ -160,29 +200,103 @@
         const itemsData = await itemsRes.json();
         if (!itemsRes.ok) throw new Error(itemsData.error?.message || "No se encontró la lista");
 
-        renderizar(itemsData.value);
+        procesarCambios(itemsData.value);
+        itemsCache = itemsData.value;
+        renderizarFiltros();
+        renderizarLista();
+
         const hora = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-        document.getElementById("mensaje").innerText = `Conectado (${itemsData.value.length} registros)`;
+        const avisoMod = itemsModificados.size > 0 ? ` · ${itemsModificados.size} modificado(s)` : "";
+        document.getElementById("mensaje").innerText = `Total: ${itemsCache.length}${avisoMod}`;
         document.getElementById("lastSync").innerText = `Sync: ${hora}`;
       } catch (err) {
         if (!silencioso) document.getElementById("mensaje").innerText = "Error: " + err.message;
+      } finally {
+        setAnimacionRefresh(false);
       }
     }
 
-    function renderizar(items) {
+    function procesarCambios(nuevosItems) {
+      const nuevoSnapshot = {};
+      nuevosItems.forEach(item => {
+        const f = item.fields;
+        const firma = `${f.Estado || ""}|${f.PilotoID || ""}|${f.VehiculoID || ""}|${f.Modified || ""}`;
+        nuevoSnapshot[item.id] = firma;
+
+        if (!primeraCarga && snapshotPrevio[item.id] && snapshotPrevio[item.id] !== firma) {
+          itemsModificados.add(item.id);
+        }
+      });
+      snapshotPrevio = nuevoSnapshot;
+      primeraCarga = false;
+    }
+
+    // --- Filtros y Renderizado ---
+    function cambiarFiltro(nuevoFiltro) {
+      filtroActual = nuevoFiltro;
+      renderizarFiltros();
+      renderizarLista();
+    }
+
+    function renderizarFiltros() {
+      const bar = document.getElementById("filtrosBar");
+      bar.style.display = "flex";
+
+      const conteos = { TODOS: itemsCache.length };
+      ESTADOS.forEach(e => conteos[e] = 0);
+      itemsCache.forEach(item => {
+        const est = item.fields.Estado || "";
+        if (conteos[est] !== undefined) conteos[est]++;
+      });
+
+      const opciones = [{ id: "TODOS", label: `Todos (${conteos.TODOS})` }]
+        .concat(ESTADOS.map(e => ({ id: e, label: `${e} (${conteos[e]})` })));
+
+      bar.innerHTML = opciones.map(op => `
+        <button class="filter-btn ${filtroActual === op.id ? 'active' : ''}" onclick="cambiarFiltro('${op.id}')">
+          ${op.label}
+        </button>
+      `).join("");
+    }
+
+    function limpiarMarcaModificado(itemId) {
+      if (itemsModificados.has(itemId)) {
+        itemsModificados.delete(itemId);
+        renderizarLista();
+      }
+    }
+
+    function renderizarLista() {
       const contenedor = document.getElementById("lista");
       contenedor.innerHTML = "";
-      items.forEach(item => {
+
+      const filtrados = filtroActual === "TODOS"
+        ? itemsCache
+        : itemsCache.filter(item => (item.fields.Estado || "") === filtroActual);
+
+      if (filtrados.length === 0) {
+        contenedor.innerHTML = `<div style="text-align:center; color:#64748b; padding:24px; background:#fff; border-radius:10px;">No hay despachos en esta etapa.</div>`;
+        return;
+      }
+
+      filtrados.forEach(item => {
         const f = item.fields;
         const estadoActual = f.Estado || "";
+        const esModificado = itemsModificados.has(item.id);
+
         const card = document.createElement("div");
-        card.className = `card ${estadoActual}`;
+        card.className = `card ${estadoActual} ${esModificado ? 'is-modified' : ''}`;
+        card.onclick = () => limpiarMarcaModificado(item.id);
+
         card.innerHTML = `
-          <div style="font-weight: 700; font-size: 16px;">Despacho #${f.Title || item.id}</div>
+          <div class="card-header">
+            <div style="font-weight: 700; font-size: 16px;">Despacho #${f.Title || item.id}</div>
+            ${esModificado ? `<span class="badge-mod" title="Modificado recientemente">● Actualizado</span>` : ``}
+          </div>
           <div style="font-size: 13px; color: #475569; margin-top: 4px;">Piloto: ${f.PilotoID || "Sin asignar"} | Vehículo: ${f.VehiculoID || "-"}</div>
           <div class="btns">
             ${ESTADOS.map(est => `
-              <button class="${estadoActual === est ? 'active-' + est : ''}" onclick="cambiarEstado('${item.id}', '${est}')">${est}</button>
+              <button class="${estadoActual === est ? 'active-' + est : ''}" onclick="event.stopPropagation(); cambiarEstado('${item.id}', '${est}')">${est}</button>
             `).join("")}
           </div>
         `;
@@ -204,6 +318,11 @@
           const errData = await res.json();
           throw new Error(errData.error?.message || "Error al actualizar");
         }
+        // Actualizar firma local para no marcar como externo nuestro propio cambio
+        const updatedFields = await res.json();
+        snapshotPrevio[itemId] = `${updatedFields.Estado || ""}|${updatedFields.PilotoID || ""}|${updatedFields.VehiculoID || ""}|${updatedFields.Modified || ""}`;
+        itemsModificados.delete(itemId);
+
         guardando = false;
         await cargarDespachos(false);
       } catch (err) {
